@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
+from prometheus_client import CollectorRegistry, Gauge, generate_latest
 from sqlalchemy import func, select
 
 from citeguard.db import DatabaseManager
@@ -136,21 +137,36 @@ def create_app(
             ).all()
 
         status_counts = {str(st): int(cnt) for st, cnt in status_rows}
-        lines = [
-            "# HELP citeguard_active_chunks Total active chunks indexed in ledger and Qdrant",
-            "# TYPE citeguard_active_chunks gauge",
-            f"citeguard_active_chunks {active_chunks}",
-            "# HELP citeguard_sync_chunks_total Cumulative chunk sync operations by action",
-            "# TYPE citeguard_sync_chunks_total counter",
-            f'citeguard_sync_chunks_total{{action="added"}} {added_sum}',
-            f'citeguard_sync_chunks_total{{action="skipped"}} {skipped_sum}',
-            f'citeguard_sync_chunks_total{{action="purged"}} {purged_sum}',
-            "# HELP citeguard_queries_total Total RAG queries by grounding status",
-            "# TYPE citeguard_queries_total counter",
-            f'citeguard_queries_total{{status="GROUNDED"}} {status_counts.get("GROUNDED", 0)}',
-            f'citeguard_queries_total{{status="FALLBACK_EXTRACTIVE"}} {status_counts.get("FALLBACK_EXTRACTIVE", 0)}',
-            f'citeguard_queries_total{{status="ABSTAINED"}} {status_counts.get("ABSTAINED", 0)}',
-        ]
-        return "\n".join(lines) + "\n"
+
+        registry = CollectorRegistry()
+        g_active = Gauge(
+            "citeguard_active_chunks",
+            "Total active chunks indexed in ledger and Qdrant",
+            registry=registry,
+        )
+        g_sync = Gauge(
+            "citeguard_sync_chunks_total",
+            "Cumulative chunk sync operations by action",
+            ["action"],
+            registry=registry,
+        )
+        g_queries = Gauge(
+            "citeguard_queries_total",
+            "Total RAG queries by grounding status",
+            ["status"],
+            registry=registry,
+        )
+
+        g_active.set(active_chunks)
+        g_sync.labels(action="added").set(added_sum)
+        g_sync.labels(action="skipped").set(skipped_sum)
+        g_sync.labels(action="purged").set(purged_sum)
+        g_queries.labels(status="GROUNDED").set(status_counts.get("GROUNDED", 0))
+        g_queries.labels(status="FALLBACK_EXTRACTIVE").set(
+            status_counts.get("FALLBACK_EXTRACTIVE", 0)
+        )
+        g_queries.labels(status="ABSTAINED").set(status_counts.get("ABSTAINED", 0))
+
+        return generate_latest(registry).decode("utf-8")
 
     return app

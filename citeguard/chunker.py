@@ -5,40 +5,20 @@ import re
 import uuid
 from dataclasses import dataclass
 
+from kiwipiepy import Kiwi  # type: ignore[import-untyped]
+
 HEADING_RE = re.compile(r"^(#{1,4})\s+(.+?)\s*$")
 CLAUSE_RE = re.compile(r"(제\s*\d+\s*조(?:의\s*\d+)?|Article\s+\d+(?:\.\d+)?|Rule\s+\d+(?:\.\d+)?)", re.IGNORECASE)
 TOKEN_RE = re.compile(r"[가-힣A-Za-z0-9]+(?:-\d+)?")
-KO_PARTICLES = (
-    "으로부터",
-    "에서부터",
-    "에게는",
-    "으로는",
-    "이라도",
-    "에서",
-    "으로",
-    "에게",
-    "까지",
-    "부터",
-    "이나",
-    "거나",
-    "처럼",
-    "보다",
-    "조차",
-    "마저",
-    "은",
-    "는",
-    "이",
-    "가",
-    "을",
-    "를",
-    "의",
-    "에",
-    "로",
-    "와",
-    "과",
-    "도",
-    "만",
-)
+
+_kiwi: Kiwi | None = None
+
+
+def _get_kiwi() -> Kiwi:
+    global _kiwi
+    if _kiwi is None:
+        _kiwi = Kiwi()
+    return _kiwi
 
 
 @dataclass(frozen=True)
@@ -72,17 +52,24 @@ def extract_clause_code(breadcrumb: str, content: str) -> str | None:
 
 
 def tokenize_for_bm25(text: str) -> list[str]:
-    """Tokenizes Korean/English text, strips trailing Korean particles, and preserves numbers/codes."""
+    """Tokenizes Korean/English text, strips trailing Korean particles via Kiwi, and preserves numbers/codes."""
     raw_tokens = TOKEN_RE.findall(text.lower())
     result: list[str] = []
+    kiwi = _get_kiwi()
     for tok in raw_tokens:
         result.append(tok)
         if any("가" <= ch <= "힣" for ch in tok) and len(tok) >= 3:
-            for particle in KO_PARTICLES:
-                if tok.endswith(particle) and len(tok) - len(particle) >= 2:
-                    stem = tok[: -len(particle)]
-                    result.append(stem)
+            morphemes = kiwi.tokenize(tok)
+            p_len = 0
+            for m in reversed(morphemes):
+                if m.tag.startswith("J"):
+                    p_len += m.len
+                else:
                     break
+            if p_len > 0:
+                stem = tok[:-p_len]
+                if len(stem) >= 2 and stem != tok:
+                    result.append(stem)
     return result
 
 

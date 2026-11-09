@@ -5,6 +5,7 @@ import os
 from typing import Any, Protocol
 
 import httpx
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from citeguard.schemas import LLMRawOutput, RetrievedChunkItem
 
@@ -49,6 +50,12 @@ class OllamaEmbedder:
     def dimension(self) -> int:
         return self._dimension
 
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.5, min=0.5, max=5.0),
+        retry=retry_if_exception_type(httpx.TransportError),
+    )
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
@@ -103,6 +110,12 @@ class OllamaChatGenerator:
     def model_name(self) -> str:
         return f"ollama/{self.model}"
 
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.5, min=0.5, max=5.0),
+        retry=retry_if_exception_type(httpx.TransportError),
+    )
     async def generate_grounded(
         self, question: str, chunks: list[RetrievedChunkItem]
     ) -> LLMRawOutput:

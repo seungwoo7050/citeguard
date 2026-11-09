@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import argparse
 import asyncio
 import json
 from pathlib import Path
+from typing import Annotated, Optional
 
+import typer
 import uvicorn
 
 from citeguard.api import create_app
@@ -16,99 +17,103 @@ from citeguard.qdrant_store import QdrantVectorStore
 from citeguard.retriever import HybridRRFRetriever
 from citeguard.schemas import DocumentSyncRequest, MetadataFilter
 
+app = typer.Typer(
+    name="citeguard",
+    help="Incremental Qdrant Hybrid RAG and Local Ollama Grounding Verifier CLI",
+)
 
-async def _cmd_sync(args: argparse.Namespace) -> int:
-    db_mgr = DatabaseManager(args.db_url)
-    db_mgr.create_tables()
-    embedder = OllamaEmbedder(base_url=args.ollama_url, model=args.embed_model)
-    qdrant = QdrantVectorStore(base_url=args.qdrant_url, collection_name=args.collection)
-    engine = IncrementalSyncEngine(db_manager=db_mgr, embedder=embedder, qdrant=qdrant)
 
-    content: str | None = None
-    if args.file:
-        content = Path(args.file).read_text(encoding="utf-8")
+@app.command()
+def serve(
+    host: str = "127.0.0.1",
+    port: int = 8090,
+    db_url: str = "sqlite:///./citeguard.db",
+) -> None:
+    """Run FastAPI HTTP server."""
+    uvicorn.run(create_app(db_url=db_url), host=host, port=port)
 
-    res = await engine.sync_document(
-        DocumentSyncRequest(
-            doc_key=args.doc_key,
-            title=args.title,
-            source_url=args.url,
-            category=args.category,
-            language=args.language,
-            content=content,
+
+@app.command()
+def sync(
+    doc_key: Annotated[str, typer.Option("--doc-key", help="Document key")],
+    title: Annotated[str, typer.Option("--title", help="Document title")],
+    url: str = "https://official.example.org/policy",
+    file: Annotated[Optional[Path], typer.Option("--file", help="Local Markdown/HTML file path")] = None,
+    category: str = "commerce_policy",
+    language: str = "ko",
+    db_url: str = "sqlite:///./citeguard.db",
+    qdrant_url: str = "http://localhost:6333",
+    collection: str = "citeguard_chunks",
+    ollama_url: str = "http://localhost:11434",
+    embed_model: str = "all-minilm",
+) -> None:
+    """Incrementally sync a policy document into Qdrant."""
+
+    async def _run() -> None:
+        db_mgr = DatabaseManager(db_url)
+        db_mgr.create_tables()
+        embedder = OllamaEmbedder(base_url=ollama_url, model=embed_model)
+        qdrant = QdrantVectorStore(base_url=qdrant_url, collection_name=collection)
+        engine = IncrementalSyncEngine(db_manager=db_mgr, embedder=embedder, qdrant=qdrant)
+
+        content = file.read_text(encoding="utf-8") if file else None
+        res = await engine.sync_document(
+            DocumentSyncRequest(
+                doc_key=doc_key,
+                title=title,
+                source_url=url,
+                category=category,
+                language=language,
+                content=content,
+            )
         )
-    )
-    print(json.dumps(res.model_dump(), ensure_ascii=False, indent=2))
-    return 0
+        print(json.dumps(res.model_dump(), ensure_ascii=False, indent=2))
+
+    asyncio.run(_run())
 
 
-async def _cmd_ask(args: argparse.Namespace) -> int:
-    db_mgr = DatabaseManager(args.db_url)
-    db_mgr.create_tables()
-    embedder = OllamaEmbedder(base_url=args.ollama_url, model=args.embed_model)
-    generator = OllamaChatGenerator(base_url=args.ollama_url, model=args.chat_model)
-    qdrant = QdrantVectorStore(base_url=args.qdrant_url, collection_name=args.collection)
-    retriever = HybridRRFRetriever(db_manager=db_mgr, embedder=embedder, qdrant=qdrant)
-    verifier = GroundingVerifier(db_manager=db_mgr)
+@app.command()
+def ask(
+    question: Annotated[str, typer.Argument(help="Question to query")],
+    category: Optional[str] = None,
+    language: Optional[str] = None,
+    top_k: int = 4,
+    db_url: str = "sqlite:///./citeguard.db",
+    qdrant_url: str = "http://localhost:6333",
+    collection: str = "citeguard_chunks",
+    ollama_url: str = "http://localhost:11434",
+    embed_model: str = "all-minilm",
+    chat_model: str = "qwen2.5:0.5b",
+) -> None:
+    """Query Hybrid RAG and verify local LLM answer."""
 
-    filters = MetadataFilter(category=args.category, language=args.language)
-    hits = await retriever.retrieve(query=args.question, filters=filters, top_k=args.top_k)
-    resp = await verifier.generate_and_verify(
-        question=args.question,
-        retrieved_chunks=hits,
-        generator=generator,
-    )
-    print(json.dumps(resp.model_dump(), ensure_ascii=False, indent=2))
-    return 0
+    async def _run() -> None:
+        db_mgr = DatabaseManager(db_url)
+        db_mgr.create_tables()
+        embedder = OllamaEmbedder(base_url=ollama_url, model=embed_model)
+        generator = OllamaChatGenerator(base_url=ollama_url, model=chat_model)
+        qdrant = QdrantVectorStore(base_url=qdrant_url, collection_name=collection)
+        retriever = HybridRRFRetriever(db_manager=db_mgr, embedder=embedder, qdrant=qdrant)
+        verifier = GroundingVerifier(db_manager=db_mgr)
 
+        filters = MetadataFilter(category=category, language=language)
+        hits = await retriever.retrieve(query=question, filters=filters, top_k=top_k)
+        resp = await verifier.generate_and_verify(
+            question=question,
+            retrieved_chunks=hits,
+            generator=generator,
+        )
+        print(json.dumps(resp.model_dump(), ensure_ascii=False, indent=2))
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="citeguard",
-        description="Incremental Qdrant Hybrid RAG and Local Ollama Grounding Verifier CLI",
-    )
-    parser.add_argument("--db-url", default="sqlite:///./citeguard.db")
-    parser.add_argument("--qdrant-url", default="http://localhost:6333")
-    parser.add_argument("--collection", default="citeguard_chunks")
-    parser.add_argument("--ollama-url", default="http://localhost:11434")
-    parser.add_argument("--embed-model", default="all-minilm")
-    parser.add_argument("--chat-model", default="qwen2.5:0.5b")
-
-    sub = parser.add_subparsers(dest="command", required=True)
-
-    serve_p = sub.add_parser("serve", help="Run FastAPI HTTP server")
-    serve_p.add_argument("--host", default="127.0.0.1")
-    serve_p.add_argument("--port", type=int, default=8090)
-
-    sync_p = sub.add_parser("sync", help="Incrementally sync a policy document into Qdrant")
-    sync_p.add_argument("--doc-key", required=True)
-    sync_p.add_argument("--title", required=True)
-    sync_p.add_argument("--url", default="https://official.example.org/policy")
-    sync_p.add_argument("--file", default=None, help="Local Markdown/HTML file path")
-    sync_p.add_argument("--category", default="commerce_policy")
-    sync_p.add_argument("--language", default="ko")
-
-    ask_p = sub.add_parser("ask", help="Query Hybrid RAG and verify local LLM answer")
-    ask_p.add_argument("question")
-    ask_p.add_argument("--category", default=None)
-    ask_p.add_argument("--language", default=None)
-    ask_p.add_argument("--top-k", type=int, default=4)
-
-    return parser
+    asyncio.run(_run())
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    if args.command == "serve":
-        app = create_app(db_url=args.db_url)
-        uvicorn.run(app, host=args.host, port=args.port)
+    try:
+        app(args=argv, standalone_mode=False)
         return 0
-    if args.command == "sync":
-        return asyncio.run(_cmd_sync(args))
-    if args.command == "ask":
-        return asyncio.run(_cmd_ask(args))
-    return 1
+    except SystemExit as exc:
+        return exc.code if isinstance(exc.code, int) else 0
 
 
 if __name__ == "__main__":

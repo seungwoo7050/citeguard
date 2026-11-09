@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import json
-import math
-from collections import Counter
 from typing import Literal, cast
 
+from rank_bm25 import BM25Okapi  # type: ignore[import-untyped]
 from sqlalchemy import select
 
 from citeguard.chunker import tokenize_for_bm25
@@ -145,36 +144,18 @@ class HybridRRFRetriever:
             return []
 
         doc_tokens_list: list[list[str]] = []
-        df_counter: Counter[str] = Counter()
-
         for ch in chunks:
             try:
                 toks = [str(x) for x in json.loads(ch.tokens_json)]
             except Exception:
                 toks = tokenize_for_bm25(ch.indexed_text)
             doc_tokens_list.append(toks)
-            for unique_tok in set(toks):
-                df_counter[unique_tok] += 1
 
-        n_docs = len(chunks)
-        avgdl = sum(len(t) for t in doc_tokens_list) / max(n_docs, 1)
-        if avgdl == 0.0:
-            avgdl = 1.0
-
-        results: list[tuple[str, float]] = []
-        for ch, doc_toks in zip(chunks, doc_tokens_list, strict=True):
-            tf_map = Counter(doc_toks)
-            dl = len(doc_toks)
-            score = 0.0
-            for q_tok in query_tokens:
-                tf = tf_map.get(q_tok, 0)
-                if tf == 0:
-                    continue
-                df = df_counter.get(q_tok, 0)
-                idf = math.log(1.0 + (n_docs - df + 0.5) / (df + 0.5))
-                denom = tf + self.k1 * (1.0 - self.b + self.b * (dl / avgdl))
-                score += idf * ((tf * (self.k1 + 1.0)) / denom)
-            results.append((ch.chunk_uid, score))
-
+        bm25 = BM25Okapi(doc_tokens_list, k1=self.k1, b=self.b)
+        scores = bm25.get_scores(query_tokens)
+        results = [
+            (ch.chunk_uid, float(sc))
+            for ch, sc in zip(chunks, scores, strict=True)
+        ]
         results.sort(key=lambda item: item[1], reverse=True)
         return results
